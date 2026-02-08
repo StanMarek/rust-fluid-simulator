@@ -158,6 +158,6 @@ Order: `Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`, `Serialize`, `Deserialize`, 
 
 - SPH parameter consistency: `h ≈ 1.2 * particle_spacing`
 - WCSPH: speed of sound ≥ 10x max fluid velocity
-- Fixed timestep (`dt = 0.001`) with accumulator pattern
+- Fixed timestep (`dt = 0.0002`) with accumulator pattern
 - Always `--release` for performance testing
 - Domain boundaries use clamp + velocity reflection with damping factor
