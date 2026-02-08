@@ -14,5 +14,9 @@ apps/web/pkg/
 *~
 .DS_Store
 
+# Python
+__pycache__/
+*.pyc
+
 # Environment
 .env
