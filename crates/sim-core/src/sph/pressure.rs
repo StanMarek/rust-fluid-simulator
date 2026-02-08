@@ -5,13 +5,15 @@ use crate::particle::ParticleStorage;
 use crate::sph::kernel::SmoothingKernel;
 
 /// Compute pressure from density using the Tait equation of state (WCSPH).
-/// p = k * ((ρ/ρ₀)^γ - 1)
+/// p = k * ((ρ/ρ₀)^γ - 1), clamped to non-negative for free-surface stability.
 /// Using γ = 7 for water.
 pub fn compute_pressures<D: Dimension>(particles: &mut ParticleStorage<D>, config: &SimConfig) {
     let gamma = 7.0_f32;
     for i in 0..particles.len() {
         let rho_ratio = particles.densities[i] / config.rest_density;
-        particles.pressures[i] = config.stiffness * (rho_ratio.powf(gamma) - 1.0);
+        // Clamp to >= 0: negative pressure (tensile instability) causes
+        // particle clumping and explosions at free surfaces.
+        particles.pressures[i] = (config.stiffness * (rho_ratio.powf(gamma) - 1.0)).max(0.0);
     }
 }
 
@@ -28,7 +30,7 @@ pub fn compute_pressure_forces<D: Dimension>(
     // Collect pressure force contributions (avoid borrow conflict)
     let mut forces: Vec<D::Vector> = vec![D::zero(); n];
 
-    for i in 0..n {
+    for (i, force) in forces.iter_mut().enumerate() {
         let neighbors = grid.query_neighbors(&particles.positions[i], h);
 
         for &j in &neighbors {
@@ -49,13 +51,12 @@ pub fn compute_pressure_forces<D: Dimension>(
             let pressure_term =
                 particles.pressures[i] / (rho_i * rho_i) + particles.pressures[j] / (rho_j * rho_j);
 
-            let force = grad * (-particles.masses[j] * pressure_term);
-            forces[i] += force;
+            *force += grad * (-particles.masses[j] * pressure_term);
         }
     }
 
     // Apply forces as accelerations
-    for i in 0..n {
-        particles.accelerations[i] += forces[i];
+    for (accel, force) in particles.accelerations.iter_mut().zip(&forces) {
+        *accel += *force;
     }
 }

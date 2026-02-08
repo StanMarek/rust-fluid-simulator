@@ -23,8 +23,8 @@ pub fn compute_densities<D: Dimension>(
             density += particles.masses[j] * kernel.w(r, h);
         }
 
-        // Self-contribution
-        density += particles.masses[i] * kernel.w(0.0, h);
+        // Note: self-contribution (W(0,h)) is included via the grid
+        // returning particle i in its own cell.
 
         particles.densities[i] = density;
     }

@@ -18,7 +18,7 @@ pub fn compute_viscosity_forces<D: Dimension>(
 
     let mut forces: Vec<D::Vector> = vec![D::zero(); n];
 
-    for i in 0..n {
+    for (i, force) in forces.iter_mut().enumerate() {
         let neighbors = grid.query_neighbors(&particles.positions[i], h);
 
         for &j in &neighbors {
@@ -37,12 +37,11 @@ pub fn compute_viscosity_forces<D: Dimension>(
             let laplacian = kernel.laplacian_w(r, h);
             let vel_diff = particles.velocities[j] - particles.velocities[i];
 
-            let force = vel_diff * (mu * particles.masses[j] * laplacian / rho_j);
-            forces[i] += force;
+            *force += vel_diff * (mu * particles.masses[j] * laplacian / rho_j);
         }
     }
 
-    for i in 0..n {
-        particles.accelerations[i] += forces[i];
+    for (accel, force) in particles.accelerations.iter_mut().zip(&forces) {
+        *accel += *force;
     }
 }

@@ -1,28 +1,40 @@
 use common::{Dimension, SimConfig};
 
 use crate::boundary;
+use crate::neighbor::SpatialHashGrid;
 use crate::particle::ParticleStorage;
 use crate::scene::{self, SceneDescription};
 use crate::solver;
+use crate::sph::density;
+use crate::sph::kernel::{CubicSplineKernel, SmoothingKernel};
+use crate::sph::pressure;
+use crate::sph::viscosity;
 
 /// Top-level simulation state.
-/// Phase 1: gravity-only solver with boundary reflection.
-/// Phase 2 will add SPH (neighbor search, density, pressure, viscosity).
+/// Holds particle data, SPH neighbor grid, and kernel for fluid simulation.
 pub struct Simulation<D: Dimension> {
     pub particles: ParticleStorage<D>,
     pub config: SimConfig,
     pub time: f32,
     pub step_count: u64,
+    /// Spatial hash grid for neighbor search, rebuilt each step.
+    grid: SpatialHashGrid<D>,
+    /// SPH smoothing kernel.
+    kernel: CubicSplineKernel,
 }
 
 impl<D: Dimension> Simulation<D> {
     /// Create a new empty simulation.
     pub fn new(config: SimConfig) -> Self {
+        // Cell size = 2h (kernel support radius) so 3x3 query covers all neighbors.
+        let grid = SpatialHashGrid::new(2.0 * config.smoothing_radius);
         Self {
             particles: ParticleStorage::new(),
             config,
             time: 0.0,
             step_count: 0,
+            grid,
+            kernel: CubicSplineKernel,
         }
     }
 
@@ -32,6 +44,9 @@ impl<D: Dimension> Simulation<D> {
         self.particles.clear();
         self.time = 0.0;
         self.step_count = 0;
+
+        // Sync grid cell size with new config (cell_size = 2h for full kernel support).
+        self.grid.set_cell_size(2.0 * self.config.smoothing_radius);
 
         let spacing = scene.emitters.first().map_or(0.02, |e| e.spacing);
         let mass = if self.config.particle_mass > 0.0 {
@@ -49,27 +64,6 @@ impl<D: Dimension> Simulation<D> {
             scene.name,
             self.particles.len()
         );
-    }
-
-    /// Advance the simulation by one time step.
-    /// Phase 1: gravity + boundary enforcement only.
-    pub fn step(&mut self) {
-        let dt = self.config.time_step;
-
-        // 1. Clear accelerations
-        self.particles.clear_accelerations();
-
-        // 2. Apply gravity
-        solver::apply_gravity::<D>(&mut self.particles, &self.config);
-
-        // 3. Integrate (symplectic Euler)
-        solver::integrate_symplectic_euler::<D>(&mut self.particles, &self.config, dt);
-
-        // 4. Enforce boundaries
-        boundary::enforce_boundaries::<D>(&mut self.particles, &self.config);
-
-        self.time += dt;
-        self.step_count += 1;
     }
 
     /// Reset the simulation (clear particles and time).
@@ -133,5 +127,53 @@ impl<D: Dimension> Simulation<D> {
                 i += 1;
             }
         }
+    }
+}
+
+impl<D: Dimension> Simulation<D>
+where
+    CubicSplineKernel: SmoothingKernel<D>,
+{
+    /// Advance the simulation by one time step.
+    /// Full SPH loop: neighbor search, density, pressure, forces, integration.
+    pub fn step(&mut self) {
+        let dt = self.config.time_step;
+        let h = self.config.smoothing_radius;
+
+        // 1. Clear accelerations
+        self.particles.clear_accelerations();
+
+        // 2. Build neighbor grid (cell_size = 2h for full kernel support)
+        self.grid.set_cell_size(2.0 * h);
+        self.grid.build(&self.particles.positions);
+
+        // 3. Compute densities (SPH summation)
+        density::compute_densities(&mut self.particles, &self.grid, &self.kernel, h);
+
+        // 4. Compute pressures (Tait equation of state)
+        pressure::compute_pressures::<D>(&mut self.particles, &self.config);
+
+        // 5. Compute pressure gradient forces
+        pressure::compute_pressure_forces(&mut self.particles, &self.grid, &self.kernel, h);
+
+        // 6. Compute viscosity forces
+        viscosity::compute_viscosity_forces(
+            &mut self.particles,
+            &self.grid,
+            &self.kernel,
+            &self.config,
+        );
+
+        // 7. Apply gravity
+        solver::apply_gravity::<D>(&mut self.particles, &self.config);
+
+        // 8. Integrate (symplectic Euler)
+        solver::integrate_symplectic_euler::<D>(&mut self.particles, &self.config, dt);
+
+        // 9. Enforce boundaries
+        boundary::enforce_boundaries::<D>(&mut self.particles, &self.config);
+
+        self.time += dt;
+        self.step_count += 1;
     }
 }

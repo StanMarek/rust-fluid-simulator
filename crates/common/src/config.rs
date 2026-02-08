@@ -28,16 +28,16 @@ pub struct SimConfig {
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
-            smoothing_radius: 0.1,
+            smoothing_radius: 0.026,
             rest_density: 1000.0,
-            stiffness: 1000.0,
-            viscosity: 0.1,
+            stiffness: 50000.0,
+            viscosity: 0.01,
             gravity: [0.0, -9.81],
-            time_step: 0.001,
+            time_step: 0.0002,
             particle_mass: 0.0, // Auto-compute
             domain_min: [0.0, 0.0],
             domain_max: [1.0, 1.0],
-            boundary_damping: 0.5,
+            boundary_damping: 0.3,
         }
     }
 }
