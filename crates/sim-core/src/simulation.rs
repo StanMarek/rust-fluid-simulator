@@ -45,6 +45,7 @@ impl<D: Dimension> Simulation<D> {
     pub fn load_scene(&mut self, scene: &SceneDescription) {
         self.config = scene.config.clone();
         self.particles.clear();
+        self.obstacles.clear();
         self.time = 0.0;
         self.step_count = 0;
 
