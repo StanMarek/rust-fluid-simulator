@@ -115,6 +115,20 @@ impl<D: Dimension> SpatialHashGrid<D> {
         (hx ^ hy) % self.table_size
     }
 
+    /// Export grid data for GPU upload.
+    /// Returns (sorted_indices, cell_starts, cell_counts) as flat arrays.
+    pub fn export_for_gpu(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        let sorted_indices: Vec<u32> = self.entries.iter().map(|(_, idx)| *idx).collect();
+        let cell_starts: Vec<u32> = self.offsets.iter().map(|(start, _)| *start).collect();
+        let cell_counts: Vec<u32> = self.offsets.iter().map(|(_, count)| *count).collect();
+        (sorted_indices, cell_starts, cell_counts)
+    }
+
+    /// Get the table size (number of hash buckets).
+    pub fn table_size(&self) -> u32 {
+        self.table_size
+    }
+
     /// Hash a position directly.
     #[inline]
     fn hash_position(&self, pos: &D::Vector) -> u32 {

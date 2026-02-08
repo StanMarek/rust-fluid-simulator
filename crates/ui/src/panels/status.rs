@@ -10,6 +10,7 @@ pub fn draw_status_bar(
     sim_time: f32,
     step_count: u64,
     is_playing: bool,
+    backend_name: &str,
 ) {
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 16.0;
@@ -32,6 +33,11 @@ pub fn draw_status_bar(
         );
 
         // Separator
+        ui.label(egui::RichText::new("\u{00B7}").size(10.0).color(theme::TEXT_DISABLED));
+
+        // Backend indicator
+        ui.label(theme::value_text(backend_name));
+
         ui.label(egui::RichText::new("\u{00B7}").size(10.0).color(theme::TEXT_DISABLED));
 
         // Particle count
