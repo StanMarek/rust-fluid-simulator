@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 common = { path = "../common" }
 sim-core = { path = "../sim-core" }
+sim-gpu = { path = "../sim-gpu" }
 renderer = { path = "../renderer" }
 bytemuck = { workspace = true }
 egui = { workspace = true }

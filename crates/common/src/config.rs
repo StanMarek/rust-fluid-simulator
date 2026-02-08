@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+/// Number of hash buckets for the spatial hash grid (2^18).
+pub const GRID_TABLE_SIZE: u32 = 262144;
+
 /// Simulation configuration. All parameters are exposed via UI sliders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimConfig {

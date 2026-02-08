@@ -42,6 +42,7 @@ const ALL_COLOR_MAPS: [ColorMapType; 4] = [
 pub enum SceneAction {
     LoadPreset(ScenePreset),
     LoadScene(SceneDescription),
+    SwitchBackend(bool),
 }
 
 /// Draw the scene & display panel.
@@ -51,6 +52,7 @@ pub fn draw_scene_panel(
     current: &mut ScenePreset,
     color_map: &mut ColorMapType,
     load_error: &mut Option<String>,
+    is_gpu: bool,
 ) -> Option<SceneAction> {
     let mut action = None;
 
@@ -61,6 +63,19 @@ pub fn draw_scene_panel(
         })
         .body(|ui| {
             theme::section_frame().show(ui, |ui| {
+                // Backend toggle (CPU / GPU)
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Backend").size(11.0).color(theme::TEXT_SECONDARY));
+                    if ui.selectable_label(!is_gpu, "CPU").clicked() && is_gpu {
+                        action = Some(SceneAction::SwitchBackend(false));
+                    }
+                    if ui.selectable_label(is_gpu, "GPU").clicked() && !is_gpu {
+                        action = Some(SceneAction::SwitchBackend(true));
+                    }
+                });
+
+                ui.add_space(4.0);
+
                 // Scene preset ComboBox
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Scene").size(11.0).color(theme::TEXT_SECONDARY));

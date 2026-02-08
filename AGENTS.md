@@ -40,7 +40,7 @@ Cargo workspace with `resolver = "2"`. Crate dependency graph:
 ```
 apps/desktop, apps/web → ui → renderer → common
                            → sim-core → common
-sim-gpu → common
+                           → sim-gpu → sim-core, common
 tools/benchmark → sim-core, common
 ```
 

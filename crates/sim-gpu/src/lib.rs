@@ -1,6 +1,9 @@
 pub mod buffers;
 pub mod context;
+pub mod gpu_simulation;
+pub mod grid_buffers;
 pub mod pipelines;
+pub mod shader_loader;
+pub mod uniforms;
 
-// GPU simulation backend — Phase 4 implementation.
-// This crate will mirror sim-core's SPH logic using wgpu compute shaders.
+pub use gpu_simulation::GpuSimulation;

@@ -32,14 +32,16 @@ Cargo workspace implementing a real-time 2D SPH (Smoothed Particle Hydrodynamics
 
 ```
 apps/desktop, apps/web
-    └── ui (egui panels, app orchestration)
+    └── ui (egui panels, app orchestration, backend switching)
             ├── renderer (wgpu particle visualization)
             │     └── common
             ├── sim-core (CPU physics)
             │     └── common
+            ├── sim-gpu (GPU compute shaders)
+            │     ├── sim-core
+            │     └── common
             └── common (Dimension trait, SimConfig, events)
 
-sim-gpu (GPU compute, mirrors sim-core) → common
 tools/benchmark → sim-core, common
 ```
 
@@ -79,11 +81,15 @@ Color maps: viridis, plasma, coolwarm, water — in `renderer/color_map.rs`.
 
 ### GPU Backend
 
-`sim-gpu/` — Scaffolded but not implemented. `GpuContext` (device/queue setup) works. `ParticleBuffers` is a placeholder. WGSL compute shaders exist as files but pipeline implementations are stubs. Intended to mirror sim-core's SPH loop on GPU.
+`sim-gpu/` — Full GPU compute backend mirroring the CPU SPH pipeline. `GpuContext` (device/queue setup via wgpu), `GpuSimulation` orchestrator, `ParticleBuffers` (SoA GPU buffers with staging for readback), `GridBuffers` (spatial hash data). Five WGSL compute shaders dispatched per step: `clear_gravity` → `density` (kernel summation with 9-cell neighbor search) → `pressure` (Tait equation) → `forces` (pressure gradient + viscosity) → `integrate` (symplectic Euler + boundary + obstacles). Shared WGSL structs via `shader_loader.rs` string concatenation. CPU-side particle mutations (spawn/erase/drag) use dirty flag + upload. Spatial hash grid built on CPU each frame, uploaded via `export_for_gpu()`.
+
+### Backend Abstraction
+
+`ui/backend.rs` — `SimulationBackend` enum (`Cpu(Simulation<Dim2>)` | `Gpu(GpuSimulation)`) with delegation methods for the full simulation API. Live CPU/GPU switching via UI toggle in the Scene panel, reloading the current scene on switch.
 
 ### UI
 
-`ui/` uses egui/eframe with a custom theme (`ui/theme.rs`). Single left sidebar contains: custom-painted transport controls (play/pause/step/reset with working speed multiplier), 2x2 tool grid (emit/drag/erase/obstacle), collapsible property panels (physics, gravity, timestep, boundary), and scene/display options (presets + JSON file loading via `rfd`). Bottom status bar shows play state, particle count, FPS, sim time, step count. Center viewport renders particles via wgpu with domain boundary corners, obstacle shapes (semi-transparent), and tool cursor visualization. `InteractionState` handles tool selection, mouse→world coordinate conversion, and drag-based emit/erase/force/obstacle application.
+`ui/` uses egui/eframe with a custom theme (`ui/theme.rs`). Single left sidebar contains: custom-painted transport controls (play/pause/step/reset with working speed multiplier), 2x2 tool grid (emit/drag/erase/obstacle), collapsible property panels (physics, gravity, timestep, boundary), and scene/display options (presets + JSON file loading via `rfd` + CPU/GPU backend toggle). Bottom status bar shows play state, active backend (CPU/GPU), particle count, FPS, sim time, step count. Center viewport renders particles via wgpu with domain boundary corners, obstacle shapes (semi-transparent), and tool cursor visualization. `InteractionState` handles tool selection, mouse→world coordinate conversion, and drag-based emit/erase/force/obstacle application.
 
 ### Scene System
 
@@ -101,6 +107,6 @@ Scenes defined as `SceneDescription` (name, config, emitters) in `sim-core/scene
 - **Phase 1** (Foundation): Complete — particles fall, bounce, render
 - **Phase 2** (SPH Physics): Complete — full SPH pipeline integrated into simulation loop, Rayon-parallelized
 - **Phase 3** (Interactivity): Complete — emit/drag/erase/obstacle tools functional, properties panel with live sliders, scene presets + JSON file loading, timeline with working step button and speed multiplier, velocity-based color mapping
-- **Phase 4** (GPU): Scaffolded only (context works, pipelines are stubs, shaders orphaned)
+- **Phase 4** (GPU): Complete — full SPH compute pipeline on GPU, SimulationBackend enum with live CPU/GPU toggle
 - **Phase 5** (Web): Entry point exists, not tested
 - **Phase 6** (Polish): Not started (surface tension stub, export trait defined)

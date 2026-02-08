@@ -27,7 +27,7 @@ const HASH_PRIME_Z: u32 = 83492791;
 impl<D: Dimension> SpatialHashGrid<D> {
     /// Create a new spatial hash grid with the given cell size.
     pub fn new(cell_size: f32) -> Self {
-        let table_size: u32 = 262144; // 2^18
+        let table_size: u32 = common::GRID_TABLE_SIZE;
         Self {
             entries: Vec::new(),
             offsets: vec![(0, 0); table_size as usize],
@@ -113,6 +113,20 @@ impl<D: Dimension> SpatialHashGrid<D> {
         let hx = (cx as u32).wrapping_mul(HASH_PRIME_X);
         let hy = (cy as u32).wrapping_mul(HASH_PRIME_Y);
         (hx ^ hy) % self.table_size
+    }
+
+    /// Export grid data for GPU upload.
+    /// Returns (sorted_indices, cell_starts, cell_counts) as flat arrays.
+    pub fn export_for_gpu(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        let sorted_indices: Vec<u32> = self.entries.iter().map(|(_, idx)| *idx).collect();
+        let cell_starts: Vec<u32> = self.offsets.iter().map(|(start, _)| *start).collect();
+        let cell_counts: Vec<u32> = self.offsets.iter().map(|(_, count)| *count).collect();
+        (sorted_indices, cell_starts, cell_counts)
+    }
+
+    /// Get the table size (number of hash buckets).
+    pub fn table_size(&self) -> u32 {
+        self.table_size
     }
 
     /// Hash a position directly.

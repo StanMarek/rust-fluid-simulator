@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 common = { path = "../common" }
+sim-core = { path = "../sim-core" }
+nalgebra = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 log = { workspace = true }
+pollster = "0.4"

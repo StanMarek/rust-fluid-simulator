@@ -9,8 +9,8 @@ use renderer::particle_renderer::{ParticleInstance, ParticleRenderer};
 use sim_core::obstacle::Obstacle;
 use sim_core::particle::properties::DEFAULT_PARTICLE_RADIUS;
 use sim_core::scene::SceneDescription;
-use sim_core::Simulation;
 
+use crate::backend::SimulationBackend;
 use crate::interaction::{InteractionState, Tool};
 use crate::panels::scene::{SceneAction, ScenePreset};
 use crate::panels::timeline::TimelineState;
@@ -18,8 +18,8 @@ use crate::theme;
 
 /// Main application state. Orchestrates simulation, rendering, and UI.
 pub struct FluidSimApp {
-    // Simulation
-    simulation: Simulation<Dim2>,
+    // Simulation backend (CPU or GPU)
+    backend: SimulationBackend,
 
     // Rendering
     camera: Camera2D,
@@ -48,7 +48,7 @@ pub struct FluidSimApp {
 impl FluidSimApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let config = SimConfig::default();
-        let simulation = Simulation::<Dim2>::new(config);
+        let backend = SimulationBackend::new_cpu(config);
 
         // Initialize the wgpu particle renderer and store in callback resources.
         if let Some(render_state) = &cc.wgpu_render_state {
@@ -61,7 +61,7 @@ impl FluidSimApp {
         }
 
         Self {
-            simulation,
+            backend,
             camera: Camera2D::new(800.0, 600.0),
             color_map_type: ColorMapType::Water,
             interaction: InteractionState::default(),
@@ -82,34 +82,63 @@ impl FluidSimApp {
             ScenePreset::DamBreak => SceneDescription::dam_break(),
             ScenePreset::DoubleEmitter => SceneDescription::double_emitter(),
         };
-        self.simulation.load_scene(&scene);
+        self.backend.load_scene(&scene);
+    }
+
+    /// Switch between CPU and GPU backends, reloading the current scene.
+    fn switch_backend(&mut self, use_gpu: bool) {
+        let config = self.backend.config().clone();
+        if use_gpu {
+            match SimulationBackend::new_gpu(config) {
+                Some(mut new_backend) => {
+                    let scene = match self.scene_preset {
+                        ScenePreset::DamBreak => SceneDescription::dam_break(),
+                        ScenePreset::DoubleEmitter => SceneDescription::double_emitter(),
+                    };
+                    new_backend.load_scene(&scene);
+                    self.backend = new_backend;
+                    log::info!("Switched to GPU backend");
+                }
+                None => {
+                    log::warn!("GPU backend not available");
+                    self.scene_load_error = Some("GPU backend not available".into());
+                }
+            }
+        } else {
+            let mut new_backend = SimulationBackend::new_cpu(config);
+            let scene = match self.scene_preset {
+                ScenePreset::DamBreak => SceneDescription::dam_break(),
+                ScenePreset::DoubleEmitter => SceneDescription::double_emitter(),
+            };
+            new_backend.load_scene(&scene);
+            self.backend = new_backend;
+            log::info!("Switched to CPU backend");
+        }
     }
 
     /// Build particle instances for rendering from current simulation state.
     fn build_instances(&self) -> Vec<ParticleInstance> {
-        let particles = &self.simulation.particles;
-        let n = particles.len();
+        let (positions, velocities) = self.backend.particle_data_for_rendering();
+        let n = positions.len();
         let mut instances = Vec::with_capacity(n);
 
         // Compute velocity magnitude range for color mapping.
         let mut max_vel = 1.0_f32;
-        for i in 0..n {
-            let vel = &particles.velocities[i];
-            let speed = Dim2::magnitude(vel);
+        for vel in &velocities {
+            let speed = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
             if speed > max_vel {
                 max_vel = speed;
             }
         }
 
         for i in 0..n {
-            let pos = &particles.positions[i];
-            let vel = &particles.velocities[i];
-            let speed = Dim2::magnitude(vel);
+            let speed =
+                (velocities[i][0] * velocities[i][0] + velocities[i][1] * velocities[i][1]).sqrt();
             let t = (speed / max_vel).clamp(0.0, 1.0);
             let color = ColorMap::map(t, self.color_map_type);
 
             instances.push(ParticleInstance {
-                world_pos: [Dim2::component(pos, 0), Dim2::component(pos, 1)],
+                world_pos: positions[i],
                 color,
                 radius: DEFAULT_PARTICLE_RADIUS,
             });
@@ -161,7 +190,7 @@ impl FluidSimApp {
             let local_x = pos.x - self.viewport_rect.min.x;
             let local_y = pos.y - self.viewport_rect.min.y;
             let (wx, wy) = InteractionState::screen_to_world(&self.camera, local_x, local_y);
-            let domain = &self.simulation.config;
+            let domain = self.backend.config();
             let in_domain = wx >= domain.domain_min[0]
                 && wx <= domain.domain_max[0]
                 && wy >= domain.domain_min[1]
@@ -187,7 +216,7 @@ impl FluidSimApp {
 
                 match self.interaction.active_tool {
                     Tool::Emit => {
-                        self.simulation.spawn_particles_at(
+                        self.backend.spawn_particles_at(
                             wx,
                             wy,
                             self.interaction.tool_radius,
@@ -195,12 +224,12 @@ impl FluidSimApp {
                         );
                     }
                     Tool::Erase => {
-                        self.simulation
+                        self.backend
                             .erase_particles_at(wx, wy, self.interaction.tool_radius);
                     }
                     Tool::Obstacle => {
                         let center = Dim2::from_slice(&[wx, wy]);
-                        self.simulation.obstacles.push(Obstacle::Circle {
+                        self.backend.push_obstacle(Obstacle::Circle {
                             center,
                             radius: self.interaction.tool_radius,
                         });
@@ -216,7 +245,7 @@ impl FluidSimApp {
                             let dx = wx - lx;
                             let dy = wy - ly;
                             if dx * dx + dy * dy > (self.interaction.tool_radius * 0.5).powi(2) {
-                                self.simulation.spawn_particles_at(
+                                self.backend.spawn_particles_at(
                                     wx,
                                     wy,
                                     self.interaction.tool_radius,
@@ -227,14 +256,20 @@ impl FluidSimApp {
                         }
                     }
                     Tool::Erase => {
-                        self.simulation
+                        self.backend
                             .erase_particles_at(wx, wy, self.interaction.tool_radius);
                     }
                     Tool::Drag => {
                         if let Some((lx, ly)) = self.interaction.last_mouse_world {
                             let fx = (wx - lx) * 500.0;
                             let fy = (wy - ly) * 500.0;
-                            self.apply_drag_force(wx, wy, fx, fy);
+                            self.backend.apply_force_at(
+                                wx,
+                                wy,
+                                fx,
+                                fy,
+                                self.interaction.tool_radius,
+                            );
                         }
                         self.interaction.last_mouse_world = Some((wx, wy));
                     }
@@ -249,34 +284,12 @@ impl FluidSimApp {
         }
     }
 
-    /// Apply a drag force to particles near a position.
-    fn apply_drag_force(&mut self, x: f32, y: f32, fx: f32, fy: f32) {
-        let radius = self.interaction.tool_radius;
-        let radius_sq = radius * radius;
-        let particles = &mut self.simulation.particles;
-
-        for i in 0..particles.len() {
-            let pos = &particles.positions[i];
-            let px = Dim2::component(pos, 0);
-            let py = Dim2::component(pos, 1);
-            let dx = px - x;
-            let dy = py - y;
-            let dist_sq = dx * dx + dy * dy;
-
-            if dist_sq < radius_sq {
-                let factor = 1.0 - (dist_sq / radius_sq).sqrt();
-                let force = Dim2::from_slice(&[fx * factor, fy * factor]);
-                particles.velocities[i] += force;
-            }
-        }
-    }
-
     /// Remove the obstacle closest to the given world position (if within tool radius).
     fn remove_obstacle_at(&mut self, x: f32, y: f32) {
         let point = Dim2::from_slice(&[x, y]);
         let mut best_idx = None;
         let mut best_dist = f32::INFINITY;
-        for (i, obs) in self.simulation.obstacles.iter().enumerate() {
+        for (i, obs) in self.backend.obstacles().iter().enumerate() {
             let d = obs.sdf(&point).abs();
             if d < best_dist {
                 best_dist = d;
@@ -285,7 +298,7 @@ impl FluidSimApp {
         }
         if let Some(idx) = best_idx {
             if best_dist < self.interaction.tool_radius * 2.0 {
-                self.simulation.obstacles.swap_remove(idx);
+                self.backend.remove_obstacle(idx);
             }
         }
     }
@@ -313,14 +326,14 @@ impl eframe::App for FluidSimApp {
 
         // Run simulation steps
         if self.timeline.step_once {
-            self.simulation.step();
+            self.backend.step();
             self.timeline.step_once = false;
         }
         if self.timeline.is_playing {
             let scaled = (self.timeline.substeps as f32 * self.timeline.speed_multiplier).round() as u32;
             let substeps = scaled.clamp(1, 100);
             for _ in 0..substeps {
-                self.simulation.step();
+                self.backend.step();
             }
         }
 
@@ -336,11 +349,12 @@ impl eframe::App for FluidSimApp {
             .show(ctx, |ui| {
                 crate::panels::status::draw_status_bar(
                     ui,
-                    self.simulation.particles.len(),
+                    self.backend.particle_count(),
                     self.fps,
-                    self.simulation.time,
-                    self.simulation.step_count,
+                    self.backend.time(),
+                    self.backend.step_count(),
                     self.timeline.is_playing,
+                    self.backend.backend_name(),
                 );
             });
 
@@ -369,7 +383,7 @@ impl eframe::App for FluidSimApp {
                     // Properties sections (4 collapsible sub-sections)
                     crate::panels::properties::draw_properties(
                         ui,
-                        &mut self.simulation.config,
+                        self.backend.config_mut(),
                     );
 
                     ui.add_space(theme::SECTION_SPACING);
@@ -380,13 +394,17 @@ impl eframe::App for FluidSimApp {
                         &mut self.scene_preset,
                         &mut self.color_map_type,
                         &mut self.scene_load_error,
+                        self.backend.is_gpu(),
                     ) {
                         match action {
                             SceneAction::LoadPreset(preset) => {
                                 self.load_scene(preset);
                             }
                             SceneAction::LoadScene(scene) => {
-                                self.simulation.load_scene(&scene);
+                                self.backend.load_scene(&scene);
+                            }
+                            SceneAction::SwitchBackend(use_gpu) => {
+                                self.switch_backend(use_gpu);
                             }
                         }
                     }
@@ -408,14 +426,15 @@ impl eframe::App for FluidSimApp {
             painter.rect_filled(rect, 0.0, theme::BG_BASE);
 
             // Draw domain boundary with subtle styling
+            let config = self.backend.config();
             let domain_min_screen = self.world_to_screen(
-                self.simulation.config.domain_min[0],
-                self.simulation.config.domain_min[1],
+                config.domain_min[0],
+                config.domain_min[1],
                 &rect,
             );
             let domain_max_screen = self.world_to_screen(
-                self.simulation.config.domain_max[0],
-                self.simulation.config.domain_max[1],
+                config.domain_max[0],
+                config.domain_max[1],
                 &rect,
             );
             let domain_rect = egui::Rect::from_min_max(
@@ -468,7 +487,7 @@ impl eframe::App for FluidSimApp {
             // Draw obstacles
             let obs_fill = theme::COLOR_OBSTACLE.gamma_multiply(0.15);
             let obs_stroke = egui::Stroke::new(1.5, theme::COLOR_OBSTACLE.gamma_multiply(0.6));
-            for obstacle in &self.simulation.obstacles {
+            for obstacle in self.backend.obstacles() {
                 match obstacle {
                     Obstacle::Circle { center, radius } => {
                         let (sx, sy) = self.world_to_screen(
