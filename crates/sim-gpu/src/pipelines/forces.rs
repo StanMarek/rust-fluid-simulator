@@ -158,6 +158,7 @@ impl ForcesPipeline {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_particle_bind_group(
         &self,
         device: &wgpu::Device,
@@ -212,6 +213,6 @@ impl ForcesPipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, particle_bg, &[]);
         pass.set_bind_group(1, grid_bg, &[]);
-        pass.dispatch_workgroups((particle_count + 63) / 64, 1, 1);
+        pass.dispatch_workgroups(particle_count.div_ceil(64), 1, 1);
     }
 }

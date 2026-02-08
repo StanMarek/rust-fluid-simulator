@@ -20,7 +20,7 @@ impl GpuContext {
         let adapter_info = adapter.get_info();
         log::info!("GPU adapter: {:?}", adapter_info);
 
-        let (device, queue) = adapter
+        let (device, queue) = match adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Fluid Sim GPU"),
@@ -31,7 +31,13 @@ impl GpuContext {
                 None,
             )
             .await
-            .ok()?;
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                log::warn!("Failed to request GPU device: {}", e);
+                return None;
+            }
+        };
 
         Some(Self {
             device,

@@ -99,6 +99,6 @@ impl PressurePipeline {
     ) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
-        pass.dispatch_workgroups((particle_count + 63) / 64, 1, 1);
+        pass.dispatch_workgroups(particle_count.div_ceil(64), 1, 1);
     }
 }

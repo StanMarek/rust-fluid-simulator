@@ -1,6 +1,5 @@
 /// WGSL shader loading with shared struct prepending.
 /// Since WGSL has no #include, we concatenate shared definitions at load time.
-
 const SIM_PARAMS_WGSL: &str = include_str!("shaders/sim_params.wgsl");
 const GRID_COMMON_WGSL: &str = include_str!("shaders/grid_common.wgsl");
 

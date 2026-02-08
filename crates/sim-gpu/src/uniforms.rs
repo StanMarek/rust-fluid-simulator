@@ -61,12 +61,14 @@ impl SimParamsUniform {
             domain_max_x: config.domain_max[0],
             domain_max_y: config.domain_max[1],
             particle_count,
-            grid_table_size: 262144, // 2^18
+            grid_table_size: common::GRID_TABLE_SIZE,
             grid_cell_size: 2.0 * h,
             _pad: 0.0,
         }
     }
 }
+
+const _: () = assert!(std::mem::size_of::<SimParamsUniform>() == 80);
 
 /// GPU-side obstacle data. Matches WGSL ObstacleData layout.
 #[repr(C)]

@@ -6,17 +6,17 @@ use sim_gpu::GpuSimulation;
 
 /// Unified backend that delegates to either a CPU or GPU simulation.
 pub enum SimulationBackend {
-    Cpu(Simulation<Dim2>),
-    Gpu(GpuSimulation),
+    Cpu(Box<Simulation<Dim2>>),
+    Gpu(Box<GpuSimulation>),
 }
 
 impl SimulationBackend {
     pub fn new_cpu(config: SimConfig) -> Self {
-        SimulationBackend::Cpu(Simulation::new(config))
+        SimulationBackend::Cpu(Box::new(Simulation::new(config)))
     }
 
     pub fn new_gpu(config: SimConfig) -> Option<Self> {
-        GpuSimulation::create(config).map(SimulationBackend::Gpu)
+        GpuSimulation::create(config).map(|g| SimulationBackend::Gpu(Box::new(g)))
     }
 
     pub fn step(&mut self) {

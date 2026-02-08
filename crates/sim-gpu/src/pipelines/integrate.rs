@@ -138,7 +138,7 @@ impl IntegratePipeline {
     ) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
-        let workgroups = (particle_count + 63) / 64;
+        let workgroups = particle_count.div_ceil(64);
         pass.dispatch_workgroups(workgroups, 1, 1);
     }
 }

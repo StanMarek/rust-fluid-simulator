@@ -101,6 +101,7 @@ impl FluidSimApp {
                 }
                 None => {
                     log::warn!("GPU backend not available");
+                    self.scene_load_error = Some("GPU backend not available".into());
                 }
             }
         } else {

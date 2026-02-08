@@ -27,7 +27,7 @@ const HASH_PRIME_Z: u32 = 83492791;
 impl<D: Dimension> SpatialHashGrid<D> {
     /// Create a new spatial hash grid with the given cell size.
     pub fn new(cell_size: f32) -> Self {
-        let table_size: u32 = 262144; // 2^18
+        let table_size: u32 = common::GRID_TABLE_SIZE;
         Self {
             entries: Vec::new(),
             offsets: vec![(0, 0); table_size as usize],

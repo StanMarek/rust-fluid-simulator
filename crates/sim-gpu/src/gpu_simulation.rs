@@ -62,7 +62,7 @@ impl GpuSimulation {
             mapped_at_creation: false,
         });
 
-        let grid_buffers = GridBuffers::new(device, 1024, 262144);
+        let grid_buffers = GridBuffers::new(device, 1024, common::GRID_TABLE_SIZE);
         let grid = SpatialHashGrid::new(2.0 * config.smoothing_radius);
         let clear_gravity_pipeline = ClearGravityPipeline::new(device);
         let density_pipeline = DensityPipeline::new(device);
@@ -142,7 +142,9 @@ impl GpuSimulation {
             bytemuck::bytes_of(&obstacles_uniform),
         );
 
-        // CPU grid build: download positions, build grid, upload to GPU
+        // CPU grid build: download positions, build grid, upload to GPU.
+        // Known performance limitation: GPU→CPU→GPU round-trip each step.
+        // Future: GPU-side grid build (planned for M6).
         let positions_cpu = self.buffers.download_positions(device, queue, self.particle_count);
         {
             let positions_nalgebra: Vec<nalgebra::Vector2<f32>> = positions_cpu
@@ -211,34 +213,58 @@ impl GpuSimulation {
             &self.obstacles_buffer,
         );
 
-        // Encode and submit full SPH pipeline
+        // Encode full SPH pipeline. Each stage uses a separate compute pass
+        // so storage buffer writes are synchronized between dependent stages.
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("sim_step_encoder"),
         });
 
+        // 1. Clear accelerations + apply gravity
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("sim_step_pass"),
+                label: Some("clear_gravity_pass"),
                 timestamp_writes: None,
             });
-
-            // 1. Clear accelerations + apply gravity
             self.clear_gravity_pipeline
                 .dispatch(&mut pass, &clear_gravity_bg, self.particle_count);
+        }
 
-            // 2. Density (SPH kernel summation)
+        // 2. Density (SPH kernel summation)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("density_pass"),
+                timestamp_writes: None,
+            });
             self.density_pipeline
                 .dispatch(&mut pass, &density_particle_bg, &density_grid_bg, self.particle_count);
+        }
 
-            // 3. Pressure (Tait equation)
+        // 3. Pressure (Tait equation)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("pressure_pass"),
+                timestamp_writes: None,
+            });
             self.pressure_pipeline
                 .dispatch(&mut pass, &pressure_bg, self.particle_count);
+        }
 
-            // 4. Forces (pressure gradient + viscosity)
+        // 4. Forces (pressure gradient + viscosity)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("forces_pass"),
+                timestamp_writes: None,
+            });
             self.forces_pipeline
                 .dispatch(&mut pass, &forces_particle_bg, &forces_grid_bg, self.particle_count);
+        }
 
-            // 5. Integration + boundary + obstacles
+        // 5. Integration + boundary + obstacles
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("integrate_pass"),
+                timestamp_writes: None,
+            });
             self.integrate_pipeline
                 .dispatch(&mut pass, &integrate_bg, self.particle_count);
         }
@@ -398,9 +424,14 @@ impl GpuSimulation {
             &self.context.queue,
             self.particle_count,
         );
+        let masses = self.buffers.download_masses(
+            &self.context.device,
+            &self.context.queue,
+            self.particle_count,
+        );
 
         self.cpu_particles.clear();
-        let mass = if self.config.particle_mass > 0.0 {
+        let fallback_mass = if self.config.particle_mass > 0.0 {
             self.config.particle_mass
         } else {
             self.config.compute_particle_mass(0.02, Dim2::DIM)
@@ -408,6 +439,7 @@ impl GpuSimulation {
         for i in 0..self.particle_count as usize {
             let pos = Dim2::from_slice(&positions[i]);
             let vel = Dim2::from_slice(&velocities[i]);
+            let mass = masses.get(i).copied().unwrap_or(fallback_mass);
             self.cpu_particles.add(pos, vel, mass);
         }
     }

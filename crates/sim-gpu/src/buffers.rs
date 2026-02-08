@@ -22,7 +22,7 @@ impl ParticleBuffers {
             accelerations: Self::create_vec2_buffer(device, cap, "accelerations", false),
             densities: Self::create_f32_buffer(device, cap, "densities"),
             pressures: Self::create_f32_buffer(device, cap, "pressures"),
-            masses: Self::create_f32_buffer(device, cap, "masses"),
+            masses: Self::create_f32_buffer_with_copy_src(device, cap, "masses", true),
             capacity: cap,
         }
     }
@@ -47,10 +47,23 @@ impl ParticleBuffers {
     }
 
     fn create_f32_buffer(device: &wgpu::Device, capacity: u32, label: &str) -> wgpu::Buffer {
+        Self::create_f32_buffer_with_copy_src(device, capacity, label, false)
+    }
+
+    fn create_f32_buffer_with_copy_src(
+        device: &wgpu::Device,
+        capacity: u32,
+        label: &str,
+        copy_src: bool,
+    ) -> wgpu::Buffer {
+        let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        if copy_src {
+            usage |= wgpu::BufferUsages::COPY_SRC;
+        }
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: (capacity as u64) * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage,
             mapped_at_creation: false,
         })
     }
@@ -114,6 +127,62 @@ impl ParticleBuffers {
         Self::download_vec2_buffer(device, queue, &self.velocities, count)
     }
 
+    /// Download masses from GPU to CPU.
+    pub fn download_masses(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        count: u32,
+    ) -> Vec<f32> {
+        Self::download_f32_buffer(device, queue, &self.masses, count)
+    }
+
+    fn download_f32_buffer(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        source: &wgpu::Buffer,
+        count: u32,
+    ) -> Vec<f32> {
+        let byte_size = (count as u64) * 4;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("download_staging_f32"),
+            size: byte_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("download_f32_encoder"),
+        });
+        encoder.copy_buffer_to_buffer(source, 0, &staging, 0, byte_size);
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device.poll(wgpu::Maintain::Wait);
+
+        let map_result = match receiver.recv() {
+            Ok(r) => r,
+            Err(_) => {
+                log::warn!("GPU buffer readback: channel closed");
+                return Vec::new();
+            }
+        };
+        if let Err(e) = map_result {
+            log::warn!("GPU buffer readback failed: {}", e);
+            return Vec::new();
+        }
+
+        let data = slice.get_mapped_range();
+        let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        result
+    }
+
     fn download_vec2_buffer(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -140,7 +209,18 @@ impl ParticleBuffers {
             let _ = sender.send(result);
         });
         device.poll(wgpu::Maintain::Wait);
-        receiver.recv().unwrap().unwrap();
+
+        let map_result = match receiver.recv() {
+            Ok(r) => r,
+            Err(_) => {
+                log::warn!("GPU buffer readback: channel closed");
+                return Vec::new();
+            }
+        };
+        if let Err(e) = map_result {
+            log::warn!("GPU buffer readback failed: {}", e);
+            return Vec::new();
+        }
 
         let data = slice.get_mapped_range();
         let result: Vec<[f32; 2]> = bytemuck::cast_slice(&data).to_vec();
