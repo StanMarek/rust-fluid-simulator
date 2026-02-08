@@ -6,12 +6,13 @@ use egui_wgpu::wgpu;
 use renderer::camera::Camera2D;
 use renderer::color_map::{ColorMap, ColorMapType};
 use renderer::particle_renderer::{ParticleInstance, ParticleRenderer};
+use sim_core::obstacle::Obstacle;
 use sim_core::particle::properties::DEFAULT_PARTICLE_RADIUS;
 use sim_core::scene::SceneDescription;
 use sim_core::Simulation;
 
 use crate::interaction::{InteractionState, Tool};
-use crate::panels::scene::ScenePreset;
+use crate::panels::scene::{SceneAction, ScenePreset};
 use crate::panels::timeline::TimelineState;
 use crate::theme;
 
@@ -39,6 +40,9 @@ pub struct FluidSimApp {
 
     // Viewport rect from previous frame (used to gate pointer input)
     viewport_rect: egui::Rect,
+
+    // Scene file loading error (displayed in scene panel)
+    scene_load_error: Option<String>,
 }
 
 impl FluidSimApp {
@@ -68,6 +72,7 @@ impl FluidSimApp {
             frame_count: 0,
             needs_initial_load: true,
             viewport_rect: egui::Rect::NOTHING,
+            scene_load_error: None,
         }
     }
 
@@ -124,6 +129,7 @@ impl FluidSimApp {
                 i.pointer.button_released(egui::PointerButton::Primary),
                 i.smooth_scroll_delta.y,
                 i.pointer.delta(),
+                i.pointer.secondary_pressed(),
             )
         });
 
@@ -135,6 +141,7 @@ impl FluidSimApp {
             primary_released,
             scroll_y,
             delta,
+            secondary_pressed,
         ) = input;
 
         // Zoom with scroll wheel
@@ -169,6 +176,11 @@ impl FluidSimApp {
                 return;
             }
 
+            // Right-click removes obstacles (when obstacle tool is active)
+            if secondary_pressed && self.interaction.active_tool == Tool::Obstacle {
+                self.remove_obstacle_at(wx, wy);
+            }
+
             if primary_pressed {
                 self.interaction.is_dragging = true;
                 self.interaction.last_mouse_world = Some((wx, wy));
@@ -186,7 +198,14 @@ impl FluidSimApp {
                         self.simulation
                             .erase_particles_at(wx, wy, self.interaction.tool_radius);
                     }
-                    Tool::Drag | Tool::Obstacle => {}
+                    Tool::Obstacle => {
+                        let center = Dim2::from_slice(&[wx, wy]);
+                        self.simulation.obstacles.push(Obstacle::Circle {
+                            center,
+                            radius: self.interaction.tool_radius,
+                        });
+                    }
+                    Tool::Drag => {}
                 }
             }
 
@@ -251,6 +270,25 @@ impl FluidSimApp {
             }
         }
     }
+
+    /// Remove the obstacle closest to the given world position (if within tool radius).
+    fn remove_obstacle_at(&mut self, x: f32, y: f32) {
+        let point = Dim2::from_slice(&[x, y]);
+        let mut best_idx = None;
+        let mut best_dist = f32::INFINITY;
+        for (i, obs) in self.simulation.obstacles.iter().enumerate() {
+            let d = obs.sdf(&point).abs();
+            if d < best_dist {
+                best_dist = d;
+                best_idx = Some(i);
+            }
+        }
+        if let Some(idx) = best_idx {
+            if best_dist < self.interaction.tool_radius * 2.0 {
+                self.simulation.obstacles.swap_remove(idx);
+            }
+        }
+    }
 }
 
 impl eframe::App for FluidSimApp {
@@ -274,8 +312,13 @@ impl eframe::App for FluidSimApp {
         self.frame_count += 1;
 
         // Run simulation steps
+        if self.timeline.step_once {
+            self.simulation.step();
+            self.timeline.step_once = false;
+        }
         if self.timeline.is_playing {
-            let substeps = self.timeline.substeps;
+            let scaled = (self.timeline.substeps as f32 * self.timeline.speed_multiplier).round() as u32;
+            let substeps = scaled.clamp(1, 100);
             for _ in 0..substeps {
                 self.simulation.step();
             }
@@ -332,12 +375,20 @@ impl eframe::App for FluidSimApp {
                     ui.add_space(theme::SECTION_SPACING);
 
                     // Scene & Display section
-                    if let Some(preset) = crate::panels::scene::draw_scene_panel(
+                    if let Some(action) = crate::panels::scene::draw_scene_panel(
                         ui,
                         &mut self.scene_preset,
                         &mut self.color_map_type,
+                        &mut self.scene_load_error,
                     ) {
-                        self.load_scene(preset);
+                        match action {
+                            SceneAction::LoadPreset(preset) => {
+                                self.load_scene(preset);
+                            }
+                            SceneAction::LoadScene(scene) => {
+                                self.simulation.load_scene(&scene);
+                            }
+                        }
                     }
                 });
             });
@@ -414,6 +465,42 @@ impl eframe::App for FluidSimApp {
             );
             painter.add(cb);
 
+            // Draw obstacles
+            let obs_fill = theme::COLOR_OBSTACLE.gamma_multiply(0.15);
+            let obs_stroke = egui::Stroke::new(1.5, theme::COLOR_OBSTACLE.gamma_multiply(0.6));
+            for obstacle in &self.simulation.obstacles {
+                match obstacle {
+                    Obstacle::Circle { center, radius } => {
+                        let (sx, sy) = self.world_to_screen(
+                            Dim2::component(center, 0),
+                            Dim2::component(center, 1),
+                            &rect,
+                        );
+                        let r_pixels = radius * self.camera.zoom * rect.height();
+                        painter.circle_filled(egui::pos2(sx, sy), r_pixels, obs_fill);
+                        painter.circle_stroke(egui::pos2(sx, sy), r_pixels, obs_stroke);
+                    }
+                    Obstacle::Box { min, max } => {
+                        let (sx_min, sy_min) = self.world_to_screen(
+                            Dim2::component(min, 0),
+                            Dim2::component(min, 1),
+                            &rect,
+                        );
+                        let (sx_max, sy_max) = self.world_to_screen(
+                            Dim2::component(max, 0),
+                            Dim2::component(max, 1),
+                            &rect,
+                        );
+                        let obs_rect = egui::Rect::from_min_max(
+                            egui::pos2(sx_min, sy_max),
+                            egui::pos2(sx_max, sy_min),
+                        );
+                        painter.rect_filled(obs_rect, 0.0, obs_fill);
+                        painter.rect_stroke(obs_rect, egui::CornerRadius::ZERO, obs_stroke, egui::StrokeKind::Outside);
+                    }
+                }
+            }
+
             // Draw tool cursor with tool-specific color (only inside domain box)
             if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
                 if domain_rect.contains(pos) {
@@ -436,8 +523,8 @@ impl eframe::App for FluidSimApp {
             }
         });
 
-        // Request continuous repaint when simulation is running
-        if self.timeline.is_playing {
+        // Request continuous repaint when simulation is running or step was requested
+        if self.timeline.is_playing || self.timeline.step_once {
             ctx.request_repaint();
         }
     }

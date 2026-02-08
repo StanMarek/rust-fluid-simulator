@@ -1,5 +1,6 @@
 use egui::Ui;
 use renderer::color_map::ColorMapType;
+use sim_core::scene::SceneDescription;
 
 use crate::theme;
 
@@ -37,14 +38,21 @@ const ALL_COLOR_MAPS: [ColorMapType; 4] = [
     ColorMapType::Coolwarm,
 ];
 
+/// What the scene panel wants the app to do.
+pub enum SceneAction {
+    LoadPreset(ScenePreset),
+    LoadScene(SceneDescription),
+}
+
 /// Draw the scene & display panel.
-/// Returns Some(preset) if the user selected a scene to load.
+/// Returns Some action if the user selected a scene to load.
 pub fn draw_scene_panel(
     ui: &mut Ui,
     current: &mut ScenePreset,
     color_map: &mut ColorMapType,
-) -> Option<ScenePreset> {
-    let mut load = None;
+    load_error: &mut Option<String>,
+) -> Option<SceneAction> {
+    let mut action = None;
 
     let scene_id = ui.make_persistent_id("scene_display");
     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), scene_id, true)
@@ -63,11 +71,46 @@ pub fn draw_scene_panel(
                                 let selected = *current == *preset;
                                 if ui.selectable_label(selected, preset.label()).clicked() {
                                     *current = *preset;
-                                    load = Some(*preset);
+                                    action = Some(SceneAction::LoadPreset(*preset));
                                 }
                             }
                         });
                 });
+
+                ui.add_space(4.0);
+
+                // Load from file button
+                if ui.button("Load File...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("JSON Scene", &["json"])
+                        .pick_file()
+                    {
+                        match std::fs::read_to_string(&path) {
+                            Ok(contents) => {
+                                match serde_json::from_str::<SceneDescription>(&contents) {
+                                    Ok(scene) => {
+                                        *load_error = None;
+                                        action = Some(SceneAction::LoadScene(scene));
+                                    }
+                                    Err(e) => {
+                                        *load_error = Some(format!("Invalid JSON: {e}"));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                *load_error = Some(format!("Read error: {e}"));
+                            }
+                        }
+                    }
+                }
+
+                // Show error if any
+                if let Some(err) = load_error {
+                    ui.colored_label(
+                        theme::COLOR_ERASE,
+                        egui::RichText::new(err.as_str()).size(10.0),
+                    );
+                }
 
                 ui.add_space(4.0);
 
@@ -88,5 +131,5 @@ pub fn draw_scene_panel(
             });
         });
 
-    load
+    action
 }
