@@ -2,6 +2,7 @@ use common::{Dimension, SimConfig};
 
 use crate::boundary;
 use crate::neighbor::SpatialHashGrid;
+use crate::obstacle::Obstacle;
 use crate::particle::ParticleStorage;
 use crate::scene::{self, SceneDescription};
 use crate::solver;
@@ -17,6 +18,7 @@ pub struct Simulation<D: Dimension> {
     pub config: SimConfig,
     pub time: f32,
     pub step_count: u64,
+    pub obstacles: Vec<Obstacle<D>>,
     /// Spatial hash grid for neighbor search, rebuilt each step.
     grid: SpatialHashGrid<D>,
     /// SPH smoothing kernel.
@@ -33,6 +35,7 @@ impl<D: Dimension> Simulation<D> {
             config,
             time: 0.0,
             step_count: 0,
+            obstacles: Vec::new(),
             grid,
             kernel: CubicSplineKernel,
         }
@@ -66,9 +69,10 @@ impl<D: Dimension> Simulation<D> {
         );
     }
 
-    /// Reset the simulation (clear particles and time).
+    /// Reset the simulation (clear particles, obstacles, and time).
     pub fn reset(&mut self) {
         self.particles.clear();
+        self.obstacles.clear();
         self.time = 0.0;
         self.step_count = 0;
     }
@@ -174,6 +178,13 @@ where
 
         // 9. Enforce boundaries
         boundary::enforce_boundaries::<D>(&mut self.particles, &self.config);
+
+        // 10. Enforce obstacle boundaries
+        boundary::enforce_obstacle_boundaries::<D>(
+            &mut self.particles,
+            &self.obstacles,
+            self.config.boundary_damping,
+        );
 
         self.time += dt;
         self.step_count += 1;

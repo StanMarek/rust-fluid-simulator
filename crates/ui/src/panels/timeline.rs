@@ -7,6 +7,7 @@ pub struct TimelineState {
     pub is_playing: bool,
     pub speed_multiplier: f32,
     pub substeps: u32,
+    pub step_once: bool,
 }
 
 impl Default for TimelineState {
@@ -15,6 +16,7 @@ impl Default for TimelineState {
             is_playing: false,
             speed_multiplier: 1.0,
             substeps: 4,
+            step_once: false,
         }
     }
 }
@@ -164,7 +166,7 @@ pub fn draw_transport(ui: &mut Ui, state: &mut TimelineState) -> bool {
             "Step Forward",
         ) {
             state.is_playing = false;
-            state.substeps = 1;
+            state.step_once = true;
         }
 
         // Reset
