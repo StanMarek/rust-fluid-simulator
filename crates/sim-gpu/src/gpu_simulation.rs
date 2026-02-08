@@ -430,6 +430,12 @@ impl GpuSimulation {
             self.particle_count,
         );
 
+        let n = self.particle_count as usize;
+        if positions.len() < n || velocities.len() < n {
+            log::warn!("GPU readback returned incomplete data, skipping sync");
+            return;
+        }
+
         self.cpu_particles.clear();
         let fallback_mass = if self.config.particle_mass > 0.0 {
             self.config.particle_mass
