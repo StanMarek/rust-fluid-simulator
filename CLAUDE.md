@@ -26,7 +26,7 @@ There are no tests yet. Debug builds are 10-50x slower for SPH — always use `-
 
 ## Architecture
 
-Cargo workspace implementing a real-time 2D SPH (Smoothed Particle Hydrodynamics) fluid simulator with GPU acceleration. Currently in early phases (gravity-only solver works; SPH kernels and forces are implemented but not yet wired into the main simulation loop).
+Cargo workspace implementing a real-time 2D SPH (Smoothed Particle Hydrodynamics) fluid simulator with GPU acceleration. SPH physics fully integrated with Rayon-parallelized neighbor search, density, pressure, and viscosity computations.
 
 ### Crate Dependency Graph
 
@@ -53,14 +53,21 @@ All simulation code is generic over `D: Dimension` (defined in `common/dimension
 
 ### Simulation Loop (`sim-core/simulation.rs`)
 
-`Simulation<D>` holds `ParticleStorage<D>`, `SimConfig`, time, step count. Current `step()` does: clear accelerations → apply gravity → symplectic Euler integration → boundary enforcement (clamp + velocity reflection).
+`Simulation<D>` holds `ParticleStorage<D>`, `SpatialHashGrid<D>`, `SimConfig`, time, step count. The `step()` method runs the full SPH pipeline each frame, parallelized with Rayon:
 
-SPH modules exist but are **not yet called** from `step()`:
-- `sph/density.rs` — density summation via kernel contributions
-- `sph/pressure.rs` — Tait equation (WCSPH, γ=7) + pressure gradient forces
-- `sph/viscosity.rs` — artificial viscosity forces
-- `sph/kernel.rs` — `SmoothingKernel` trait + `CubicSplineKernel` (implemented for `Dim2` only)
-- `neighbor/grid.rs` — `SpatialHashGrid<D>` using spatial hashing with large primes, cell size = h
+1. Clear accelerations
+2. Build spatial hash grid (`neighbor/grid.rs` — `SpatialHashGrid<D>`, cell_size = 2h, zero-allocation neighbor iterator)
+3. Compute densities (`sph/density.rs` — SPH kernel summation)
+4. Compute pressures (`sph/pressure.rs` — Tait equation, WCSPH, γ=7)
+5. Compute pressure gradient forces (`sph/pressure.rs`)
+6. Compute viscosity forces (`sph/viscosity.rs` — artificial viscosity via Laplacian kernel)
+7. Apply gravity (`solver.rs`)
+8. Symplectic Euler integration (`solver.rs`)
+9. Boundary enforcement (`boundary.rs` — clamp + velocity reflection with damping)
+
+Supporting modules:
+- `sph/kernel.rs` — `SmoothingKernel` trait + `CubicSplineKernel` (w, grad_w, laplacian_w for `Dim2`)
+- `neighbor/grid.rs` — flat sorted-array spatial hash with large primes, 9-cell 2D query
 
 ### Rendering
 
@@ -74,7 +81,7 @@ Color maps: viridis, plasma, coolwarm, water — in `renderer/color_map.rs`.
 
 ### UI
 
-`ui/` uses egui/eframe. Panels: toolbar (emit/drag/erase/obstacle tools), properties (sim parameter sliders), scene (preset loading), viewport (wgpu surface), timeline (play/pause/step). `InteractionState` handles tool selection and mouse→world coordinate conversion.
+`ui/` uses egui/eframe with a custom theme (`ui/theme.rs`). Single left sidebar contains: custom-painted transport controls (play/pause/step/reset), 2x2 tool grid (emit/drag/erase/obstacle), collapsible property panels (physics, gravity, timestep, boundary), and scene/display options. Bottom status bar shows play state, particle count, FPS, sim time, step count. Center viewport renders particles via wgpu with domain boundary corners and tool cursor visualization. `InteractionState` handles tool selection, mouse→world coordinate conversion, and drag-based emit/erase/force application.
 
 ### Scene System
 
@@ -83,15 +90,15 @@ Scenes defined as `SceneDescription` (name, config, emitters) in `sim-core/scene
 ## Key Conventions
 
 - **Math**: `nalgebra` for simulation vectors, `glam` for rendering. `bytemuck` for GPU buffer data.
-- **Configs**: `SimConfig` is `Serialize`/`Deserialize` via serde. Defaults: h=0.1, ρ₀=1000, k=1000, μ=0.1, dt=0.001, gravity=[0,-9.81].
+- **Configs**: `SimConfig` is `Serialize`/`Deserialize` via serde. Defaults: h=0.026, ρ₀=1000, k=50000, μ=0.01, dt=0.0002, gravity=[0,-9.81].
 - **Sim↔UI communication**: `SimEvent` enum (Play/Pause/Step/Reset/Spawn/ApplyForce/Erase/UpdateConfig) and `SimStatus` struct in `common/events.rs`.
 - **SPH parameter relationships**: smoothing radius `h` and particle spacing should satisfy `h ≈ 1.2 * spacing`. Speed of sound must be ≥ 10x max fluid velocity for WCSPH stability. Fixed timestep with accumulator pattern decouples sim and render rates.
 
 ## Implementation Status (per SPEC.md phases)
 
 - **Phase 1** (Foundation): Complete — particles fall, bounce, render
-- **Phase 2** (SPH Physics): Modules written but not integrated into simulation loop
-- **Phase 3** (Interactivity): Partially scaffolded (tools, panels exist as structures)
-- **Phase 4** (GPU): Scaffolded only (context works, pipelines are stubs)
+- **Phase 2** (SPH Physics): Complete — fully integrated into simulation loop, Rayon-parallelized
+- **Phase 3** (Interactivity): Functional — emit/drag/erase tools work, all UI panels complete, obstacle tool placeholder
+- **Phase 4** (GPU): Scaffolded only (context works, pipelines are stubs, shaders orphaned)
 - **Phase 5** (Web): Entry point exists, not tested
 - **Phase 6** (Polish): Not started (surface tension stub, export trait defined)
