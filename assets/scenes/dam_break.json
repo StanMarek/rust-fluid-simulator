@@ -1,0 +1,23 @@
+{
+    "name": "Dam Break",
+    "config": {
+        "smoothing_radius": 0.1,
+        "rest_density": 1000.0,
+        "stiffness": 1000.0,
+        "viscosity": 0.1,
+        "gravity": [0.0, -9.81],
+        "time_step": 0.001,
+        "particle_mass": 0.0,
+        "domain_min": [0.0, 0.0],
+        "domain_max": [1.0, 1.0],
+        "boundary_damping": 0.5
+    },
+    "emitters": [
+        {
+            "center": [0.25, 0.5],
+            "half_size": [0.2, 0.4],
+            "spacing": 0.02,
+            "initial_velocity": [0.0, 0.0]
+        }
+    ]
+}

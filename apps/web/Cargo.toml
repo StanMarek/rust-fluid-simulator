@@ -1,0 +1,13 @@
+[package]
+name = "web"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ui = { path = "../../crates/ui" }
+eframe = { workspace = true, features = ["wgpu"] }
+wasm-bindgen = { workspace = true }
+log = { workspace = true }

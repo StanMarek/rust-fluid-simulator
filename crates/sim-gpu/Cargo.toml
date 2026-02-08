@@ -1,0 +1,10 @@
+[package]
+name = "sim-gpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }

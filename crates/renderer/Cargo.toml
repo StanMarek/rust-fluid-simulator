@@ -1,0 +1,11 @@
+[package]
+name = "renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }

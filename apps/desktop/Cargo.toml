@@ -1,0 +1,10 @@
+[package]
+name = "desktop"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ui = { path = "../../crates/ui" }
+eframe = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
