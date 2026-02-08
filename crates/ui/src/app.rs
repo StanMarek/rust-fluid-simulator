@@ -1,6 +1,8 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use common::{Dim2, Dimension, SimConfig};
+use egui_wgpu::wgpu;
 use renderer::camera::Camera2D;
 use renderer::color_map::{ColorMap, ColorMapType};
 use renderer::particle_renderer::{ParticleInstance, ParticleRenderer};
@@ -11,7 +13,6 @@ use sim_core::Simulation;
 use crate::interaction::{InteractionState, Tool};
 use crate::panels::scene::ScenePreset;
 use crate::panels::timeline::TimelineState;
-use crate::panels::viewport::ViewportConfig;
 use crate::theme;
 
 /// Main application state. Orchestrates simulation, rendering, and UI.
@@ -19,12 +20,8 @@ pub struct FluidSimApp {
     // Simulation
     simulation: Simulation<Dim2>,
 
-    // Rendering (initialized on first frame when wgpu is available)
-    #[allow(dead_code)] // Used in later phases for wgpu rendering
-    particle_renderer: Option<ParticleRenderer>,
+    // Rendering
     camera: Camera2D,
-    #[allow(dead_code)] // Used in later phases for wgpu rendering
-    viewport_config: ViewportConfig,
     color_map_type: ColorMapType,
 
     // UI state
@@ -42,15 +39,23 @@ pub struct FluidSimApp {
 }
 
 impl FluidSimApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let config = SimConfig::default();
         let simulation = Simulation::<Dim2>::new(config);
 
+        // Initialize the wgpu particle renderer and store in callback resources.
+        if let Some(render_state) = &cc.wgpu_render_state {
+            let renderer = ParticleRenderer::new(&render_state.device, render_state.target_format);
+            render_state
+                .renderer
+                .write()
+                .callback_resources
+                .insert(renderer);
+        }
+
         Self {
             simulation,
-            particle_renderer: None,
             camera: Camera2D::new(800.0, 600.0),
-            viewport_config: ViewportConfig::default(),
             color_map_type: ColorMapType::Water,
             interaction: InteractionState::default(),
             timeline: TimelineState::default(),
@@ -77,7 +82,7 @@ impl FluidSimApp {
         let n = particles.len();
         let mut instances = Vec::with_capacity(n);
 
-        // Compute velocity magnitude range for color mapping
+        // Compute velocity magnitude range for color mapping.
         let mut max_vel = 1.0_f32;
         for i in 0..n {
             let vel = &particles.velocities[i];
@@ -322,13 +327,14 @@ impl eframe::App for FluidSimApp {
                 });
             });
 
-        // Central panel: viewport (egui-painted particles for Phase 1)
+        // Central panel: viewport with wgpu instanced particle rendering.
+        let instances = self.build_instances();
+        let camera_uniform = renderer::camera::CameraUniform::from_camera(&self.camera);
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.available_rect_before_wrap();
             self.camera.set_viewport_size(rect.width(), rect.height());
 
-            // Draw particles using egui painter (Phase 1 approach)
-            // In later phases, this will be replaced with wgpu rendering
             let painter = ui.painter_at(rect);
 
             // Draw background
@@ -359,21 +365,15 @@ impl eframe::App for FluidSimApp {
                 egui::StrokeKind::Outside,
             );
 
-            // Draw particles
-            let instances = self.build_instances();
-            for inst in &instances {
-                let screen = self.world_to_screen(inst.world_pos[0], inst.world_pos[1], &rect);
-                let radius_pixels = inst.radius * self.camera.zoom * rect.height();
-                let radius_pixels = radius_pixels.max(1.5); // Minimum visible size
-
-                let color = egui::Color32::from_rgb(
-                    (inst.color[0] * 255.0) as u8,
-                    (inst.color[1] * 255.0) as u8,
-                    (inst.color[2] * 255.0) as u8,
-                );
-
-                painter.circle_filled(egui::pos2(screen.0, screen.1), radius_pixels, color);
-            }
+            // Render particles via wgpu instanced draw callback.
+            let cb = egui_wgpu::Callback::new_paint_callback(
+                rect,
+                ParticleDrawCallback {
+                    instances: Arc::new(instances),
+                    camera_uniform,
+                },
+            );
+            painter.add(cb);
 
             // Draw tool cursor
             if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
@@ -412,5 +412,41 @@ impl FluidSimApp {
         let screen_y = rect.center().y - ndc_y * rect.height() * 0.5;
 
         (screen_x, screen_y)
+    }
+}
+
+/// Callback that uploads instance data and issues the wgpu instanced draw call.
+struct ParticleDrawCallback {
+    instances: Arc<Vec<ParticleInstance>>,
+    camera_uniform: renderer::camera::CameraUniform,
+}
+
+impl egui_wgpu::CallbackTrait for ParticleDrawCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let renderer: &mut ParticleRenderer = callback_resources.get_mut().unwrap();
+        renderer.update_instances(device, queue, &self.instances);
+        queue.write_buffer(
+            renderer.camera_buffer(),
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+        let renderer: &ParticleRenderer = callback_resources.get().unwrap();
+        renderer.render(render_pass);
     }
 }

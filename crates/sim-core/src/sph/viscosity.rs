@@ -1,45 +1,62 @@
+use rayon::prelude::*;
+
 use common::{Dimension, SimConfig};
 
 use crate::neighbor::SpatialHashGrid;
 use crate::particle::ParticleStorage;
-use crate::sph::kernel::SmoothingKernel;
+use crate::sph::kernel::{KernelParams, SmoothingKernel};
 
 /// Compute artificial viscosity forces for all particles.
-/// f_viscosity_i = μ * Σ_j m_j * (v_j - v_i) / ρ_j * ∇²W(|r_i - r_j|, h)
+/// f_viscosity_i = mu * sum_j m_j * (v_j - v_i) / rho_j * laplacian_W(|r_i - r_j|, h)
 pub fn compute_viscosity_forces<D: Dimension>(
     particles: &mut ParticleStorage<D>,
     grid: &SpatialHashGrid<D>,
-    kernel: &dyn SmoothingKernel<D>,
+    kernel: &(dyn SmoothingKernel<D> + Sync),
     config: &SimConfig,
+    params: &KernelParams,
 ) {
-    let n = particles.len();
-    let h = config.smoothing_radius;
     let mu = config.viscosity;
+    let support_sq = params.support_sq;
+    let positions = &particles.positions;
+    let velocities = &particles.velocities;
+    let densities = &particles.densities;
+    let masses = &particles.masses;
 
-    let mut forces: Vec<D::Vector> = vec![D::zero(); n];
+    // Parallel viscosity force computation.
+    let forces: Vec<D::Vector> = (0..positions.len())
+        .into_par_iter()
+        .map(|i| {
+            let mut force = D::zero();
+            let pos_i = positions[i];
 
-    for (i, force) in forces.iter_mut().enumerate() {
-        let neighbors = grid.query_neighbors(&particles.positions[i], h);
+            for j in grid.query_neighbors_iter(&pos_i) {
+                if i == j {
+                    continue;
+                }
 
-        for &j in &neighbors {
-            if i == j {
-                continue;
+                let r_vec = pos_i - positions[j];
+                let dist_sq = D::magnitude_sq(&r_vec);
+
+                // Early rejection: skip particles outside kernel support.
+                if dist_sq >= support_sq {
+                    continue;
+                }
+
+                let r = dist_sq.sqrt();
+                if r < 1e-10 {
+                    continue;
+                }
+
+                let rho_j = densities[j].max(1e-6);
+                let laplacian = kernel.laplacian_w(r, params);
+                let vel_diff = velocities[j] - velocities[i];
+
+                force += vel_diff * (mu * masses[j] * laplacian / rho_j);
             }
 
-            let r_vec = particles.positions[i] - particles.positions[j];
-            let r = D::magnitude(&r_vec);
-
-            if r < 1e-10 {
-                continue;
-            }
-
-            let rho_j = particles.densities[j].max(1e-6);
-            let laplacian = kernel.laplacian_w(r, h);
-            let vel_diff = particles.velocities[j] - particles.velocities[i];
-
-            *force += vel_diff * (mu * particles.masses[j] * laplacian / rho_j);
-        }
-    }
+            force
+        })
+        .collect();
 
     for (accel, force) in particles.accelerations.iter_mut().zip(&forces) {
         *accel += *force;

@@ -6,7 +6,7 @@ use crate::particle::ParticleStorage;
 use crate::scene::{self, SceneDescription};
 use crate::solver;
 use crate::sph::density;
-use crate::sph::kernel::{CubicSplineKernel, SmoothingKernel};
+use crate::sph::kernel::{CubicSplineKernel, KernelParams, SmoothingKernel};
 use crate::sph::pressure;
 use crate::sph::viscosity;
 
@@ -139,6 +139,7 @@ where
     pub fn step(&mut self) {
         let dt = self.config.time_step;
         let h = self.config.smoothing_radius;
+        let params = KernelParams::new(h);
 
         // 1. Clear accelerations
         self.particles.clear_accelerations();
@@ -148,13 +149,13 @@ where
         self.grid.build(&self.particles.positions);
 
         // 3. Compute densities (SPH summation)
-        density::compute_densities(&mut self.particles, &self.grid, &self.kernel, h);
+        density::compute_densities(&mut self.particles, &self.grid, &self.kernel, &params);
 
         // 4. Compute pressures (Tait equation of state)
         pressure::compute_pressures::<D>(&mut self.particles, &self.config);
 
         // 5. Compute pressure gradient forces
-        pressure::compute_pressure_forces(&mut self.particles, &self.grid, &self.kernel, h);
+        pressure::compute_pressure_forces(&mut self.particles, &self.grid, &self.kernel, &params);
 
         // 6. Compute viscosity forces
         viscosity::compute_viscosity_forces(
@@ -162,6 +163,7 @@ where
             &self.grid,
             &self.kernel,
             &self.config,
+            &params,
         );
 
         // 7. Apply gravity

@@ -14,11 +14,9 @@ impl NeighborQuery {
         query_pos: &D::Vector,
         radius: f32,
     ) -> Vec<usize> {
-        let candidates = grid.query_neighbors(query_pos, radius);
         let radius_sq = radius * radius;
 
-        candidates
-            .into_iter()
+        grid.query_neighbors_iter(query_pos)
             .filter(|&idx| {
                 let diff = positions[idx] - *query_pos;
                 D::magnitude_sq(&diff) <= radius_sq

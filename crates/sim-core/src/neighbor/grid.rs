@@ -1,36 +1,39 @@
-use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use common::Dimension;
 
-/// Uniform spatial hash grid for neighbor search.
-/// Cell size equals the smoothing radius h.
+/// Flat sorted-array spatial hash grid for allocation-free neighbor search.
+/// Particles are sorted by cell hash, and an offset table maps each hash
+/// to a contiguous slice within the sorted array.
 pub struct SpatialHashGrid<D: Dimension> {
-    /// Map from cell hash to list of particle indices.
-    cells: HashMap<u64, Vec<usize>>,
-    /// Cell size (= smoothing radius h).
+    /// Sorted (hash, particle_index) entries.
+    entries: Vec<(u32, u32)>,
+    /// Offset table: `offsets[hash] = (start, count)` into `entries`.
+    offsets: Vec<(u32, u32)>,
+    /// Cell size (= 2 * smoothing_radius for full kernel support).
     cell_size: f32,
-    /// Table size for hash modulo.
-    table_size: u64,
-    _phantom: std::marker::PhantomData<D>,
+    /// Number of hash buckets.
+    table_size: u32,
+    _marker: PhantomData<D>,
 }
 
+/// Large primes for spatial hashing.
+const HASH_PRIME_X: u32 = 73856093;
+const HASH_PRIME_Y: u32 = 19349663;
+/// Future: used for 3D spatial hashing.
+#[allow(dead_code)]
+const HASH_PRIME_Z: u32 = 83492791;
+
 impl<D: Dimension> SpatialHashGrid<D> {
+    /// Create a new spatial hash grid with the given cell size.
     pub fn new(cell_size: f32) -> Self {
+        let table_size: u32 = 262144; // 2^18
         Self {
-            cells: HashMap::new(),
+            entries: Vec::new(),
+            offsets: vec![(0, 0); table_size as usize],
             cell_size,
-            table_size: 262144, // 2^18, a reasonable default
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
-    /// Clear the grid and re-insert all particles.
-    pub fn build(&mut self, positions: &[D::Vector]) {
-        self.cells.clear();
-
-        for (idx, pos) in positions.iter().enumerate() {
-            let hash = self.hash_position(pos);
-            self.cells.entry(hash).or_default().push(idx);
+            table_size,
+            _marker: PhantomData,
         }
     }
 
@@ -39,74 +42,123 @@ impl<D: Dimension> SpatialHashGrid<D> {
         self.cell_size = cell_size;
     }
 
-    /// Query all neighbor particle indices within radius of a position.
-    /// Checks the current cell and all adjacent cells.
-    pub fn query_neighbors(&self, pos: &D::Vector, _radius: f32) -> Vec<usize> {
-        let mut neighbors = Vec::new();
-        let cell_coords = self.cell_coords(pos);
+    /// Clear the grid and re-insert all particles using counting sort.
+    pub fn build(&mut self, positions: &[D::Vector]) {
+        let n = positions.len();
+        let ts = self.table_size as usize;
 
-        // Check all adjacent cells (3^DIM cells)
-        self.visit_adjacent_cells(&cell_coords, &mut |hash| {
-            if let Some(indices) = self.cells.get(&hash) {
-                neighbors.extend_from_slice(indices);
+        // 1. Resize entries buffer (reuse allocation)
+        self.entries.resize(n, (0, 0));
+
+        // 2. Count particles per hash bucket
+        for slot in self.offsets.iter_mut() {
+            *slot = (0, 0);
+        }
+        for pos in positions.iter() {
+            let h = self.hash_position(pos);
+            self.offsets[h as usize].1 += 1;
+        }
+
+        // 3. Prefix sum to compute start offsets
+        let mut running = 0u32;
+        for i in 0..ts {
+            let count = self.offsets[i].1;
+            self.offsets[i].0 = running;
+            self.offsets[i].1 = 0; // Reset count, will use as insertion cursor
+            running += count;
+        }
+
+        // 4. Place particles into sorted positions using offset cursors
+        for (idx, pos) in positions.iter().enumerate() {
+            let h = self.hash_position(pos);
+            let slot = &mut self.offsets[h as usize];
+            let dest = slot.0 + slot.1;
+            self.entries[dest as usize] = (h, idx as u32);
+            slot.1 += 1;
+        }
+    }
+
+    /// Iterate all neighbor candidate particle indices for a given position.
+    /// Visits the 9 adjacent cells (2D) or 27 cells (3D) and yields indices
+    /// from each cell's slice in the sorted entry array. Zero heap allocations.
+    #[inline]
+    pub fn query_neighbors_iter(&self, pos: &D::Vector) -> NeighborIter<'_> {
+        let cx = (D::component(pos, 0) / self.cell_size).floor() as i32;
+        let cy = (D::component(pos, 1) / self.cell_size).floor() as i32;
+
+        // Precompute all 9 cell hashes
+        let mut cell_hashes = [0u32; 9];
+        let mut idx = 0;
+        for dx in -1i32..=1 {
+            for dy in -1i32..=1 {
+                cell_hashes[idx] = self.hash_coords_2d(cx + dx, cy + dy);
+                idx += 1;
             }
-        });
+        }
 
-        neighbors
+        NeighborIter {
+            entries: &self.entries,
+            offsets: &self.offsets,
+            cell_hashes,
+            cell_count: 9,
+            current_cell: 0,
+            current_pos: 0,
+            current_end: 0,
+        }
     }
 
-    /// Compute integer cell coordinates for a position.
-    fn cell_coords(&self, pos: &D::Vector) -> Vec<i64> {
-        let mut coords = Vec::with_capacity(D::DIM);
-        for i in 0..D::DIM {
-            let c = D::component(pos, i);
-            coords.push((c / self.cell_size).floor() as i64);
-        }
-        coords
-    }
-
-    /// Hash cell coordinates to a table index.
-    fn hash_coords(&self, coords: &[i64]) -> u64 {
-        // Spatial hash using large primes
-        let primes = [73856093u64, 19349663u64, 83492791u64];
-        let mut hash: u64 = 0;
-        for (i, &c) in coords.iter().enumerate() {
-            hash ^= (c as u64).wrapping_mul(primes[i % primes.len()]);
-        }
-        hash % self.table_size
+    /// Hash 2D integer cell coordinates to a table index.
+    #[inline]
+    fn hash_coords_2d(&self, cx: i32, cy: i32) -> u32 {
+        let hx = (cx as u32).wrapping_mul(HASH_PRIME_X);
+        let hy = (cy as u32).wrapping_mul(HASH_PRIME_Y);
+        (hx ^ hy) % self.table_size
     }
 
     /// Hash a position directly.
-    fn hash_position(&self, pos: &D::Vector) -> u64 {
-        let coords = self.cell_coords(pos);
-        self.hash_coords(&coords)
+    #[inline]
+    fn hash_position(&self, pos: &D::Vector) -> u32 {
+        let cx = (D::component(pos, 0) / self.cell_size).floor() as i32;
+        let cy = (D::component(pos, 1) / self.cell_size).floor() as i32;
+        self.hash_coords_2d(cx, cy)
     }
+}
 
-    /// Visit all adjacent cells (including self) and call the callback with each hash.
-    fn visit_adjacent_cells(&self, center: &[i64], callback: &mut dyn FnMut(u64)) {
-        match D::DIM {
-            2 => {
-                for dx in -1..=1 {
-                    for dy in -1..=1 {
-                        let coords = vec![center[0] + dx, center[1] + dy];
-                        callback(self.hash_coords(&coords));
-                    }
-                }
+/// Zero-allocation iterator over neighbor particle indices.
+pub struct NeighborIter<'a> {
+    entries: &'a [(u32, u32)],
+    offsets: &'a [(u32, u32)],
+    cell_hashes: [u32; 9],
+    cell_count: usize,
+    current_cell: usize,
+    current_pos: u32,
+    current_end: u32,
+}
+
+impl<'a> Iterator for NeighborIter<'a> {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        loop {
+            // Yield from current cell slice
+            if self.current_pos < self.current_end {
+                let entry = self.entries[self.current_pos as usize];
+                self.current_pos += 1;
+                return Some(entry.1 as usize);
             }
-            3 => {
-                for dx in -1..=1 {
-                    for dy in -1..=1 {
-                        for dz in -1..=1 {
-                            let coords = vec![center[0] + dx, center[1] + dy, center[2] + dz];
-                            callback(self.hash_coords(&coords));
-                        }
-                    }
-                }
+
+            // Advance to next cell
+            if self.current_cell >= self.cell_count {
+                return None;
             }
-            _ => {
-                // Fallback: only check self cell
-                callback(self.hash_coords(center));
-            }
+
+            let hash = self.cell_hashes[self.current_cell] as usize;
+            self.current_cell += 1;
+
+            let (start, count) = self.offsets[hash];
+            self.current_pos = start;
+            self.current_end = start + count;
         }
     }
 }

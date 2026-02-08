@@ -236,8 +236,13 @@ impl ParticleRenderer {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
 
+    /// Access the camera uniform buffer for external updates.
+    pub fn camera_buffer(&self) -> &wgpu::Buffer {
+        &self.camera_buffer
+    }
+
     /// Record render commands into a render pass.
-    pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+    pub fn render(&self, render_pass: &mut wgpu::RenderPass<'_>) {
         if self.num_instances == 0 {
             return;
         }

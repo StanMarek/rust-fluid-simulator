@@ -1,43 +1,74 @@
 use common::Dimension;
 
+/// Precomputed kernel parameters to avoid redundant calculation per call.
+#[derive(Debug, Clone, Copy)]
+pub struct KernelParams {
+    /// Smoothing radius.
+    pub h: f32,
+    /// Precomputed normalization constant: 10 / (7 * pi * h^2) for 2D cubic spline.
+    pub sigma: f32,
+    /// Precomputed h^2.
+    pub h_sq: f32,
+    /// Precomputed kernel support radius squared: (2h)^2.
+    pub support_sq: f32,
+    /// Inverse of h: 1.0 / h.
+    pub h_inv: f32,
+}
+
+impl KernelParams {
+    /// Construct kernel parameters for a given smoothing radius (2D cubic spline).
+    pub fn new(h: f32) -> Self {
+        Self {
+            h,
+            sigma: 10.0 / (7.0 * std::f32::consts::PI * h * h),
+            h_sq: h * h,
+            support_sq: 4.0 * h * h,
+            h_inv: 1.0 / h,
+        }
+    }
+}
+
 /// Trait for SPH smoothing kernels.
 pub trait SmoothingKernel<D: Dimension> {
     /// Kernel value W(r, h).
-    fn w(&self, r: f32, h: f32) -> f32;
-    /// Kernel gradient ∇W(r_vec, |r|, h).
-    fn grad_w(&self, r_vec: D::Vector, r: f32, h: f32) -> D::Vector;
-    /// Kernel laplacian ∇²W(r, h) — used for viscosity.
-    fn laplacian_w(&self, r: f32, h: f32) -> f32;
+    fn w(&self, r: f32, params: &KernelParams) -> f32;
+    /// Kernel gradient grad_W(r_vec, |r|, h).
+    fn grad_w(&self, r_vec: D::Vector, r: f32, params: &KernelParams) -> D::Vector;
+    /// Kernel laplacian laplacian_W(r, h).
+    fn laplacian_w(&self, r: f32, params: &KernelParams) -> f32;
 }
 
 /// Cubic spline kernel (M4), the default for SPH.
 pub struct CubicSplineKernel;
 
 impl SmoothingKernel<common::Dim2> for CubicSplineKernel {
-    fn w(&self, r: f32, h: f32) -> f32 {
-        let q = r / h;
-        let sigma = 10.0 / (7.0 * std::f32::consts::PI * h * h);
+    #[inline]
+    fn w(&self, r: f32, params: &KernelParams) -> f32 {
+        let q = r * params.h_inv;
 
-        if q < 0.0 {
-            0.0
-        } else if q <= 1.0 {
-            sigma * (1.0 - 1.5 * q * q + 0.75 * q * q * q)
+        if q <= 1.0 {
+            params.sigma * (1.0 - 1.5 * q * q + 0.75 * q * q * q)
         } else if q <= 2.0 {
             let t = 2.0 - q;
-            sigma * 0.25 * t * t * t
+            params.sigma * 0.25 * t * t * t
         } else {
             0.0
         }
     }
 
-    fn grad_w(&self, r_vec: nalgebra::Vector2<f32>, r: f32, h: f32) -> nalgebra::Vector2<f32> {
+    #[inline]
+    fn grad_w(
+        &self,
+        r_vec: nalgebra::Vector2<f32>,
+        r: f32,
+        params: &KernelParams,
+    ) -> nalgebra::Vector2<f32> {
         if r < 1e-10 {
             return nalgebra::Vector2::zeros();
         }
 
-        let q = r / h;
-        let sigma = 10.0 / (7.0 * std::f32::consts::PI * h * h);
-        let grad_q = r_vec / (r * h);
+        let q = r * params.h_inv;
+        let grad_q = r_vec * (1.0 / (r * params.h));
 
         let dw_dq = if q <= 1.0 {
             -3.0 * q + 2.25 * q * q
@@ -48,12 +79,12 @@ impl SmoothingKernel<common::Dim2> for CubicSplineKernel {
             return nalgebra::Vector2::zeros();
         };
 
-        grad_q * (sigma * dw_dq)
+        grad_q * (params.sigma * dw_dq)
     }
 
-    fn laplacian_w(&self, r: f32, h: f32) -> f32 {
-        let q = r / h;
-        let sigma = 10.0 / (7.0 * std::f32::consts::PI * h * h);
+    #[inline]
+    fn laplacian_w(&self, r: f32, params: &KernelParams) -> f32 {
+        let q = r * params.h_inv;
 
         let d2w_dq2 = if q <= 1.0 {
             -3.0 + 4.5 * q
@@ -63,7 +94,7 @@ impl SmoothingKernel<common::Dim2> for CubicSplineKernel {
             return 0.0;
         };
 
-        // Simplified laplacian for 2D
-        sigma * d2w_dq2 / (h * h)
+        // Simplified laplacian for 2D.
+        params.sigma * d2w_dq2 / params.h_sq
     }
 }
