@@ -36,6 +36,9 @@ pub struct FluidSimApp {
 
     // Flag for initial scene load
     needs_initial_load: bool,
+
+    // Viewport rect from previous frame (used to gate pointer input)
+    viewport_rect: egui::Rect,
 }
 
 impl FluidSimApp {
@@ -64,6 +67,7 @@ impl FluidSimApp {
             fps: 0.0,
             frame_count: 0,
             needs_initial_load: true,
+            viewport_rect: egui::Rect::NOTHING,
         }
     }
 
@@ -111,7 +115,6 @@ impl FluidSimApp {
 
     /// Handle viewport mouse interaction.
     fn handle_viewport_input(&mut self, ctx: &egui::Context) {
-        // Get the central panel rect (viewport area)
         let input = ctx.input(|i| {
             (
                 i.pointer.hover_pos(),
@@ -145,9 +148,26 @@ impl FluidSimApp {
             self.camera.pan(delta.x, delta.y);
         }
 
-        // Tool interactions with left mouse button
-        if let Some(pos) = hover_pos {
-            let (wx, wy) = InteractionState::screen_to_world(&self.camera, pos.x, pos.y);
+        // Tool interactions with left mouse button (only within viewport and domain)
+        if let Some(pos) = hover_pos.filter(|p| self.viewport_rect.contains(*p)) {
+            // Offset by viewport origin so camera.screen_to_world gets local coords
+            let local_x = pos.x - self.viewport_rect.min.x;
+            let local_y = pos.y - self.viewport_rect.min.y;
+            let (wx, wy) = InteractionState::screen_to_world(&self.camera, local_x, local_y);
+            let domain = &self.simulation.config;
+            let in_domain = wx >= domain.domain_min[0]
+                && wx <= domain.domain_max[0]
+                && wy >= domain.domain_min[1]
+                && wy <= domain.domain_max[1];
+
+            if !in_domain {
+                // Outside domain: release any active drag but don't process tools
+                if primary_released {
+                    self.interaction.is_dragging = false;
+                    self.interaction.last_mouse_world = None;
+                }
+                return;
+            }
 
             if primary_pressed {
                 self.interaction.is_dragging = true;
@@ -166,16 +186,13 @@ impl FluidSimApp {
                         self.simulation
                             .erase_particles_at(wx, wy, self.interaction.tool_radius);
                     }
-                    Tool::Drag | Tool::Obstacle => {
-                        // Drag: apply force each frame while held (handled in primary_down)
-                    }
+                    Tool::Drag | Tool::Obstacle => {}
                 }
             }
 
             if primary_down && self.interaction.is_dragging {
                 match self.interaction.active_tool {
                     Tool::Emit => {
-                        // Continuous emit while dragging
                         if let Some((lx, ly)) = self.interaction.last_mouse_world {
                             let dx = wx - lx;
                             let dy = wy - ly;
@@ -195,7 +212,6 @@ impl FluidSimApp {
                             .erase_particles_at(wx, wy, self.interaction.tool_radius);
                     }
                     Tool::Drag => {
-                        // Apply force to nearby particles
                         if let Some((lx, ly)) = self.interaction.last_mouse_world {
                             let fx = (wx - lx) * 500.0;
                             let fy = (wy - ly) * 500.0;
@@ -254,7 +270,7 @@ impl eframe::App for FluidSimApp {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
-        self.fps = self.fps * 0.95 + (1.0 / dt.max(0.001)) * 0.05; // Exponential moving average
+        self.fps = self.fps * 0.95 + (1.0 / dt.max(0.001)) * 0.05;
         self.frame_count += 1;
 
         // Run simulation steps
@@ -270,59 +286,58 @@ impl eframe::App for FluidSimApp {
 
         // === UI Layout ===
 
-        // Left panel: tools + properties
-        egui::SidePanel::left("left_panel")
-            .default_width(theme::SIDE_PANEL_WIDTH)
+        // Bottom status bar
+        egui::TopBottomPanel::bottom("status_bar")
+            .exact_height(theme::STATUS_BAR_HEIGHT)
+            .frame(theme::status_bar_frame())
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    crate::panels::toolbar::draw_toolbar(ui, &mut self.interaction);
-                    ui.separator();
-                    crate::panels::properties::draw_properties(
-                        ui,
-                        &mut self.simulation.config,
-                        self.simulation.particles.len(),
-                        self.fps,
-                    );
-                });
+                crate::panels::status::draw_status_bar(
+                    ui,
+                    self.simulation.particles.len(),
+                    self.fps,
+                    self.simulation.time,
+                    self.simulation.step_count,
+                    self.timeline.is_playing,
+                );
             });
 
-        // Right panel: scene + timeline
-        egui::SidePanel::right("right_panel")
-            .default_width(theme::SIDE_PANEL_WIDTH)
+        // Left panel: all controls in one sidebar
+        egui::SidePanel::left("left_panel")
+            .exact_width(theme::SIDE_PANEL_WIDTH)
+            .frame(theme::side_panel_frame())
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    if let Some(preset) =
-                        crate::panels::scene::draw_scene_panel(ui, &mut self.scene_preset)
-                    {
-                        self.load_scene(preset);
-                    }
-
-                    ui.separator();
-
-                    let reset = crate::panels::timeline::draw_timeline(
+                    // Transport controls (always visible at top)
+                    let reset = crate::panels::timeline::draw_transport(
                         ui,
                         &mut self.timeline,
-                        self.simulation.time,
-                        self.simulation.step_count,
                     );
-
                     if reset {
                         self.load_scene(self.scene_preset);
                     }
 
-                    ui.separator();
-                    ui.label("Color Map");
-                    let maps = [
-                        (ColorMapType::Water, "Water"),
-                        (ColorMapType::Viridis, "Viridis"),
-                        (ColorMapType::Plasma, "Plasma"),
-                        (ColorMapType::Coolwarm, "Coolwarm"),
-                    ];
-                    for (map_type, label) in &maps {
-                        let selected = self.color_map_type == *map_type;
-                        if ui.selectable_label(selected, *label).clicked() {
-                            self.color_map_type = *map_type;
-                        }
+                    ui.add_space(theme::SECTION_SPACING);
+
+                    // Tools section
+                    crate::panels::toolbar::draw_toolbar(ui, &mut self.interaction);
+
+                    ui.add_space(theme::SECTION_SPACING);
+
+                    // Properties sections (4 collapsible sub-sections)
+                    crate::panels::properties::draw_properties(
+                        ui,
+                        &mut self.simulation.config,
+                    );
+
+                    ui.add_space(theme::SECTION_SPACING);
+
+                    // Scene & Display section
+                    if let Some(preset) = crate::panels::scene::draw_scene_panel(
+                        ui,
+                        &mut self.scene_preset,
+                        &mut self.color_map_type,
+                    ) {
+                        self.load_scene(preset);
                     }
                 });
             });
@@ -333,18 +348,15 @@ impl eframe::App for FluidSimApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let rect = ui.available_rect_before_wrap();
+            self.viewport_rect = rect;
             self.camera.set_viewport_size(rect.width(), rect.height());
 
             let painter = ui.painter_at(rect);
 
             // Draw background
-            painter.rect_filled(
-                rect,
-                0.0,
-                egui::Color32::from_rgba_unmultiplied(13, 13, 20, 255),
-            );
+            painter.rect_filled(rect, 0.0, theme::BG_BASE);
 
-            // Draw domain boundary
+            // Draw domain boundary with subtle styling
             let domain_min_screen = self.world_to_screen(
                 self.simulation.config.domain_min[0],
                 self.simulation.config.domain_min[1],
@@ -355,15 +367,42 @@ impl eframe::App for FluidSimApp {
                 self.simulation.config.domain_max[1],
                 &rect,
             );
+            let domain_rect = egui::Rect::from_min_max(
+                egui::pos2(domain_min_screen.0, domain_max_screen.1),
+                egui::pos2(domain_max_screen.0, domain_min_screen.1),
+            );
+
+            // Inner dark stroke for depth
             painter.rect_stroke(
-                egui::Rect::from_min_max(
-                    egui::pos2(domain_min_screen.0, domain_max_screen.1),
-                    egui::pos2(domain_max_screen.0, domain_min_screen.1),
-                ),
-                0.0,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 100)),
+                domain_rect,
+                egui::CornerRadius::same(2),
+                egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(10, 10, 14, 120)),
                 egui::StrokeKind::Outside,
             );
+            // Outer visible stroke
+            painter.rect_stroke(
+                domain_rect,
+                egui::CornerRadius::same(2),
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 62, 80)),
+                egui::StrokeKind::Outside,
+            );
+
+            // Corner accent L-shapes
+            let corner_len = 12.0;
+            let cc = egui::Color32::from_rgba_unmultiplied(80, 140, 220, 80);
+            let cs = egui::Stroke::new(1.5, cc);
+            // Top-left
+            painter.line_segment([domain_rect.left_top(), domain_rect.left_top() + egui::vec2(corner_len, 0.0)], cs);
+            painter.line_segment([domain_rect.left_top(), domain_rect.left_top() + egui::vec2(0.0, corner_len)], cs);
+            // Top-right
+            painter.line_segment([domain_rect.right_top(), domain_rect.right_top() + egui::vec2(-corner_len, 0.0)], cs);
+            painter.line_segment([domain_rect.right_top(), domain_rect.right_top() + egui::vec2(0.0, corner_len)], cs);
+            // Bottom-left
+            painter.line_segment([domain_rect.left_bottom(), domain_rect.left_bottom() + egui::vec2(corner_len, 0.0)], cs);
+            painter.line_segment([domain_rect.left_bottom(), domain_rect.left_bottom() + egui::vec2(0.0, -corner_len)], cs);
+            // Bottom-right
+            painter.line_segment([domain_rect.right_bottom(), domain_rect.right_bottom() + egui::vec2(-corner_len, 0.0)], cs);
+            painter.line_segment([domain_rect.right_bottom(), domain_rect.right_bottom() + egui::vec2(0.0, -corner_len)], cs);
 
             // Render particles via wgpu instanced draw callback.
             let cb = egui_wgpu::Callback::new_paint_callback(
@@ -375,19 +414,24 @@ impl eframe::App for FluidSimApp {
             );
             painter.add(cb);
 
-            // Draw tool cursor
+            // Draw tool cursor with tool-specific color (only inside domain box)
             if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                if rect.contains(pos) {
+                if domain_rect.contains(pos) {
                     let tool_radius_pixels =
                         self.interaction.tool_radius * self.camera.zoom * rect.height();
+                    let cursor_color = theme::tool_color(self.interaction.active_tool);
+
+                    // Outer circle
                     painter.circle_stroke(
                         pos,
                         tool_radius_pixels,
                         egui::Stroke::new(
                             1.0,
-                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 100),
+                            cursor_color.gamma_multiply(0.5),
                         ),
                     );
+                    // Center dot
+                    painter.circle_filled(pos, 2.0, cursor_color.gamma_multiply(0.7));
                 }
             }
         });
